@@ -48,21 +48,41 @@ def pick_topic(topics, forced=None):
     return topics[doy % len(topics)]
 
 
+def _make_comm(text, voice):
+    # edge-tts >=7 defaults to SentenceBoundary; we need per-word timing.
+    try:
+        return edge_tts.Communicate(text, voice, boundary="WordBoundary")
+    except TypeError:
+        return edge_tts.Communicate(text, voice)
+
+
 async def synth(text, voice, out_mp3):
     """Render speech and return word boundaries [(start_s, end_s, word)]."""
-    comm = edge_tts.Communicate(text, voice)
-    words = []
+    comm = _make_comm(text, voice)
+    words, sentences = [], []
     with open(out_mp3, "wb") as f:
         async for chunk in comm.stream():
-            if chunk["type"] == "audio":
+            ctype = chunk["type"]
+            if ctype == "audio":
                 f.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
+            elif ctype in ("WordBoundary", "SentenceBoundary"):
                 start = chunk["offset"] / 1e7
                 end = (chunk["offset"] + chunk["duration"]) / 1e7
-                words.append((start, end, chunk["text"]))
-    if not words:
-        raise SystemExit("edge-tts returned no word boundaries")
-    return words
+                item = (start, end, chunk["text"])
+                (words if ctype == "WordBoundary" else sentences).append(item)
+    return words or sentences
+
+
+def fallback_words(script, dur):
+    """Distribute timing by token length when the service sends no boundaries."""
+    toks = script.split()
+    total = sum(len(t) for t in toks) or 1
+    out, t = [], 0.0
+    for tok in toks:
+        d = dur * len(tok) / total
+        out.append((t, t + d, tok))
+        t += d
+    return out
 
 
 def ass_ts(seconds):
@@ -209,8 +229,12 @@ def main():
         print("synthesizing speech...", flush=True)
         words = asyncio.run(synth(script, voice, voice_mp3))
 
-        ass_path = os.path.join(tmp, "subs.ass")
         dur = ffprobe_duration(voice_mp3)
+        if not words:
+            print("no boundaries from edge-tts, using length-based timing")
+            words = fallback_words(script, dur)
+
+        ass_path = os.path.join(tmp, "subs.ass")
         write_ass(words, ass_path, dur)
 
         out_path = os.path.join(args.out, f"{topic['id']}.mp4")
