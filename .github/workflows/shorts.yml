@@ -1,0 +1,67 @@
+name: shorts
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "topic id (empty = rotate by day)"
+        required: false
+        default: ""
+      publish:
+        description: "publish after render"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shorts
+  cancel-in-progress: false
+
+env:
+  YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+  YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+  YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+  TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg + fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Install python deps
+        run: pip install -r requirements.txt
+
+      - name: Render short
+        run: |
+          python scripts/make_short.py --out out --topic "${{ github.event.inputs.topic }}"
+          echo "META=$(ls out/*.json | head -n1)" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: short
+          path: out/
+          retention-days: 14
+
+      - name: Publish to YouTube
+        if: ${{ env.YT_REFRESH_TOKEN != '' && (github.event_name == 'schedule' || github.event.inputs.publish == 'true') }}
+        run: python scripts/publish_youtube.py --meta "$META"
+
+      - name: Publish to TikTok
+        if: ${{ env.TIKTOK_ACCESS_TOKEN != '' && (github.event_name == 'schedule' || github.event.inputs.publish == 'true') }}
+        continue-on-error: true
+        run: python scripts/publish_tiktok.py --meta "$META"
